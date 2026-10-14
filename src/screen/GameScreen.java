@@ -5,6 +5,9 @@ import java.util.HashSet;
 import java.util.Set;
 import entity.item.ItemManager;
 import entity.item.ShieldItem;
+import entity.item.ClusterGrenadeItem;
+import entity.Grenade;
+import entity.GrenadeFragment;
 import engine.Cooldown;
 import engine.Core;
 import engine.GameSettings;
@@ -23,9 +26,9 @@ import entity.item.OrbitalAnnihilator;
 
 /**
  * Implements the game screen, where the action happens.
- * 
+ *
  * @author <a href="mailto:RobertoIA1987@gmail.com">Roberto Izquierdo Amo</a>
- * 
+ *
  */
 public class GameScreen extends Screen {
 
@@ -45,8 +48,12 @@ public class GameScreen extends Screen {
 	private static final int SEPARATION_LINE_HEIGHT = 40;
 	/** Time the space key must be held to trigger the Annihilator. */
 	private static final int ANNIHILATOR_HOLD_TIME = 1000;
-    private ItemManager itemManager;
-    private boolean shieldDroppedThisLevel = false;
+	/** Chance for a destroyed enemy ship to drop a Cluster Grenade item. */
+	private static final double GRENADE_DROP_CHANCE = 0.15;
+	/** Fixed altitude (Y) where a grenade explodes if it hits nothing. */
+	private static final int GRENADE_DETONATION_Y = 200;
+	private ItemManager itemManager;
+	private boolean shieldDroppedThisLevel = false;
 	/** Current game difficulty settings. */
 	private GameSettings gameSettings;
 	/** Current difficulty level number. */
@@ -88,12 +95,19 @@ public class GameScreen extends Screen {
 	/** Last countdown number that played a sound. */
 	private int lastCountdown = -1;
 
-    /** Prevents repeated activation while holding H. */
-    private boolean hyperfireKeyPressed = false;
+	/** Prevents repeated activation while holding H. */
+	private boolean hyperfireKeyPressed = false;
+
+	/** Grenades launched by the player and not exploded yet. */
+	private Set<Grenade> grenades;
+	/** Fragments of exploded grenades. */
+	private Set<GrenadeFragment> fragments;
+	/** Prevents launching several grenades while holding G. */
+	private boolean grenadeKeyPressed = false;
 
 	/**
 	 * Constructor, establishes the properties of the screen.
-	 * 
+	 *
 	 * @param gameState
 	 *            Current game state.
 	 * @param gameSettings
@@ -108,8 +122,8 @@ public class GameScreen extends Screen {
 	 *            Frames per second, frame rate at which the game is run.
 	 */
 	public GameScreen(final GameState gameState,
-			final GameSettings gameSettings, final boolean bonusLife,
-			final int width, final int height, final int fps) {
+					  final GameSettings gameSettings, final boolean bonusLife,
+					  final int width, final int height, final int fps) {
 		super(width, height, fps);
 
 		this.gameSettings = gameSettings;
@@ -132,9 +146,12 @@ public class GameScreen extends Screen {
 		enemyShipFormation = new EnemyShipFormation(this.gameSettings);
 		enemyShipFormation.attach(this);
 		this.ship = new Ship(this.width / 2, this.height - 30);
-        this.itemManager = new ItemManager(this.height);
-        this.shieldDroppedThisLevel = false;
-        this.hyperfireKeyPressed = false;
+		this.itemManager = new ItemManager(this.height);
+		this.shieldDroppedThisLevel = false;
+		this.hyperfireKeyPressed = false;
+		this.grenades = new HashSet<Grenade>();
+		this.fragments = new HashSet<GrenadeFragment>();
+		this.grenadeKeyPressed = false;
 		// Appears each 10-30 seconds.
 		this.enemyShipSpecialCooldown = Core.getVariableCooldown(
 				BONUS_SHIP_INTERVAL, BONUS_SHIP_VARIANCE);
@@ -153,7 +170,7 @@ public class GameScreen extends Screen {
 
 	/**
 	 * Starts the action.
-	 * 
+	 *
 	 * @return Next screen code.
 	 */
 	public final int run() {
@@ -195,49 +212,58 @@ public class GameScreen extends Screen {
 					this.ship.moveLeft();
 				}
 
-        // Normal shooting using configured controls.
-        if (inputManager.isKeyDown(
-                ControlsConfig.getKey(ControlsConfig.FIRE))) {
-            if (!this.annihilator.isCharging()) {
-                if (this.ship.shoot(this.bullets)) {
-                    this.bulletsShot++;
-                }
-            }
-        }
+				// Normal shooting using configured controls.
+				if (inputManager.isKeyDown(
+						ControlsConfig.getKey(ControlsConfig.FIRE))) {
+					if (!this.annihilator.isCharging()) {
+						if (this.ship.shoot(this.bullets)) {
+							this.bulletsShot++;
+						}
+					}
+				}
 
-        // Hyperfire test activation with the H key.
-        boolean hyperfireKeyDown =
-                inputManager.isKeyDown(KeyEvent.VK_H);
+				// Hyperfire test activation with the H key.
+				boolean hyperfireKeyDown =
+						inputManager.isKeyDown(KeyEvent.VK_H);
 
-        if (hyperfireKeyDown && !this.hyperfireKeyPressed) {
-            this.itemManager.getBuffManager().addBuff(
-                    new Hyperfire(0, 0), this.ship);
-        }
+				if (hyperfireKeyDown && !this.hyperfireKeyPressed) {
+					this.itemManager.getBuffManager().addBuff(
+							new Hyperfire(0, 0), this.ship);
+				}
 
-        this.hyperfireKeyPressed = hyperfireKeyDown;
+				this.hyperfireKeyPressed = hyperfireKeyDown;
 
-        // Orbital Annihilator charging mechanic.
-        if (inputManager.isKeyDown(KeyEvent.VK_SPACE)) {
-            if (!this.annihilator.isReady()) {
-                this.spaceHeldSince = 0;
-            } else if (this.spaceHeldSince == 0) {
-                this.spaceHeldSince = System.currentTimeMillis();
-            }
+				// Cluster Grenade launch with the G key.
+				boolean grenadeKeyDown = inputManager.isKeyDown(KeyEvent.VK_G);
 
-            if (this.spaceHeldSince != 0
-                    && this.level == OrbitalAnnihilator.REQUIRED_LEVEL
-                    && System.currentTimeMillis() - this.spaceHeldSince
-                    >= ANNIHILATOR_HOLD_TIME) {
-                this.annihilator.trigger();
-            }
-        } else {
-            this.spaceHeldSince = 0;
-        }
-    } else {
-        // Cancel charging when the ship is destroyed.
-        this.annihilator.cancelCharge();
-        this.spaceHeldSince = 0;
-    }
+				if (grenadeKeyDown && !this.grenadeKeyPressed) {
+					this.ship.launchGrenade(this.grenades, GRENADE_DETONATION_Y);
+				}
+
+				this.grenadeKeyPressed = grenadeKeyDown;
+
+				// Orbital Annihilator charging mechanic.
+				if (inputManager.isKeyDown(KeyEvent.VK_SPACE)) {
+					if (!this.annihilator.isReady()) {
+						this.spaceHeldSince = 0;
+					} else if (this.spaceHeldSince == 0) {
+						this.spaceHeldSince = System.currentTimeMillis();
+					}
+
+					if (this.spaceHeldSince != 0
+							&& this.level == OrbitalAnnihilator.REQUIRED_LEVEL
+							&& System.currentTimeMillis() - this.spaceHeldSince
+							>= ANNIHILATOR_HOLD_TIME) {
+						this.annihilator.trigger();
+					}
+				} else {
+					this.spaceHeldSince = 0;
+				}
+			} else {
+				// Cancel charging when the ship is destroyed.
+				this.annihilator.cancelCharge();
+				this.spaceHeldSince = 0;
+			}
 
 
 			if (this.enemyShipSpecial != null) {
@@ -264,9 +290,10 @@ public class GameScreen extends Screen {
 			this.enemyShipFormation.update();
 			this.enemyShipFormation.shoot(this.bullets);
 		}
-        this.itemManager.update(this.ship);
-        this.itemManager.checkCollisions(this.ship);
+		this.itemManager.update(this.ship);
+		this.itemManager.checkCollisions(this.ship);
 		manageCollisions();
+		manageGrenades();
 		if (this.annihilator.isFiring())
 			manageAnnihilatorBeam();
 		cleanBullets();
@@ -304,9 +331,9 @@ public class GameScreen extends Screen {
 
 		drawManager.drawEntity(this.ship, this.ship.getPositionX(),
 				this.ship.getPositionY());
-        if (this.ship.isShieldActive() && !this.ship.isDestroyed()) {
-            drawManager.drawShield(this, this.ship);
-        }
+		if (this.ship.isShieldActive() && !this.ship.isDestroyed()) {
+			drawManager.drawShield(this, this.ship);
+		}
 		if (this.enemyShipSpecial != null)
 			drawManager.drawEntity(this.enemyShipSpecial,
 					this.enemyShipSpecial.getPositionX(),
@@ -317,10 +344,15 @@ public class GameScreen extends Screen {
 		for (Bullet bullet : this.bullets)
 			drawManager.drawEntity(bullet, bullet.getPositionX(),
 					bullet.getPositionY());
-        this.itemManager.draw(this.drawManager);
+		for (Grenade grenade : this.grenades)
+			drawManager.drawGrenade(grenade);
+		for (GrenadeFragment fragment : this.fragments)
+			drawManager.drawGrenadeFragment(fragment);
+		this.itemManager.draw(this.drawManager);
 		// Interface.
 		drawManager.drawScore(this, this.score);
 		drawManager.drawLives(this, this.lives);
+		drawManager.drawGrenadeCount(this, this.ship.getGrenadeCount());
 		if (this.level == OrbitalAnnihilator.REQUIRED_LEVEL)
 			drawManager.drawAnnihilatorGauge(this,
 					this.annihilator.getRechargeProgress());
@@ -330,7 +362,7 @@ public class GameScreen extends Screen {
 		if (!this.inputDelay.checkFinished()) {
 			int countdown = (int) ((INPUT_DELAY
 					- (System.currentTimeMillis()
-							- this.gameStartTime)) / 1000);
+					- this.gameStartTime)) / 1000);
 			playCountdownSound(countdown);
 			drawManager.drawCountDown(this, this.level, countdown,
 					this.bonusLife);
@@ -365,22 +397,22 @@ public class GameScreen extends Screen {
 		Set<Bullet> recyclable = new HashSet<Bullet>();
 		for (Bullet bullet : this.bullets)
 			if (bullet.getSpeed() > 0) {
-                if (checkCollision(bullet, this.ship) && !this.levelFinished) {
-                    recyclable.add(bullet);
-                    if (!this.ship.isDestroyed()) {
-                        if (this.ship.isShieldActive()) {
-                            // Le bouclier absorbe l'impact : le tir est détruit mais le joueur survit
-                            this.logger.info("Enemy shot absorbed by Energy Shield.");
-                        } else {
-                            // Comportement standard : perte d'une vie et annulation des buffs actifs
-                            this.ship.destroy();
-                            this.lives--;
-                            this.itemManager.getBuffManager().resetAllBuffs(this.ship);
-                            this.logger.info("Hit on player ship, " + this.lives
-                                    + " lives remaining.");
-                        }
-                    }
-                }
+				if (checkCollision(bullet, this.ship) && !this.levelFinished) {
+					recyclable.add(bullet);
+					if (!this.ship.isDestroyed()) {
+						if (this.ship.isShieldActive()) {
+							// Le bouclier absorbe l'impact : le tir est détruit mais le joueur survit
+							this.logger.info("Enemy shot absorbed by Energy Shield.");
+						} else {
+							// Comportement standard : perte d'une vie et annulation des buffs actifs
+							this.ship.destroy();
+							this.lives--;
+							this.itemManager.getBuffManager().resetAllBuffs(this.ship);
+							this.logger.info("Hit on player ship, " + this.lives
+									+ " lives remaining.");
+						}
+					}
+				}
 			} else {
 				for (EnemyShip enemyShip : this.enemyShipFormation)
 					if (!enemyShip.isDestroyed()
@@ -389,19 +421,21 @@ public class GameScreen extends Screen {
 						this.shipsDestroyed++;
 						this.enemyShipFormation.destroy(enemyShip);
 						recyclable.add(bullet);
-                        // --- DROP DU BOUCLIER ---
-                        if (!this.shieldDroppedThisLevel) {
-                            boolean shouldDrop = (Math.random() < 0.15) || (this.enemyShipFormation.isEmpty());
-                            if (shouldDrop) {
-                                this.itemManager.spawnItem(new entity.item.ShieldItem(
-                                        enemyShip.getPositionX(),
-                                        enemyShip.getPositionY()
-                                ));
-                                this.shieldDroppedThisLevel = true;
-                                this.logger.info("Shield item dropped from enemy ship at ("
-                                        + enemyShip.getPositionX() + ", " + enemyShip.getPositionY() + ").");
-                            }
-                        }
+						// --- DROP DU BOUCLIER ---
+						if (!this.shieldDroppedThisLevel) {
+							boolean shouldDrop = (Math.random() < 0.15) || (this.enemyShipFormation.isEmpty());
+							if (shouldDrop) {
+								this.itemManager.spawnItem(new entity.item.ShieldItem(
+										enemyShip.getPositionX(),
+										enemyShip.getPositionY()
+								));
+								this.shieldDroppedThisLevel = true;
+								this.logger.info("Shield item dropped from enemy ship at ("
+										+ enemyShip.getPositionX() + ", " + enemyShip.getPositionY() + ").");
+							}
+						}
+						// --- DROP DE LA GRENADE ---
+						tryDropGrenade(enemyShip);
 					}
 				if (this.enemyShipSpecial != null
 						&& !this.enemyShipSpecial.isDestroyed()
@@ -416,6 +450,87 @@ public class GameScreen extends Screen {
 		this.bullets.removeAll(recyclable);
 		BulletPool.recycle(recyclable);
 	}
+	/**
+	 * Each destroyed enemy ship has a 15% chance to drop a Cluster Grenade
+	 * item, which falls from the position of the ship.
+	 *
+	 * @param enemyShip
+	 *            Enemy ship that was just destroyed.
+	 */
+	private void tryDropGrenade(final EnemyShip enemyShip) {
+		if (Math.random() < GRENADE_DROP_CHANCE) {
+			this.itemManager.spawnItem(new ClusterGrenadeItem(
+					enemyShip.getPositionX(), enemyShip.getPositionY()));
+			this.logger.info("Grenade item dropped from enemy ship at ("
+					+ enemyShip.getPositionX() + ", "
+					+ enemyShip.getPositionY() + ").");
+		}
+	}
+
+	/**
+	 * Moves the grenades and their fragments. A grenade explodes when it hits
+	 * an enemy or reaches its detonation altitude, and splits into 12
+	 * fragments. Each fragment destroys the first enemy it touches, then
+	 * disappears.
+	 */
+	private void manageGrenades() {
+		Set<Grenade> exploded = new HashSet<Grenade>();
+		for (Grenade grenade : this.grenades) {
+			grenade.update();
+
+			boolean impact = false;
+			for (EnemyShip enemyShip : this.enemyShipFormation)
+				if (!enemyShip.isDestroyed()
+						&& checkCollision(grenade, enemyShip)) {
+					impact = true;
+					break;
+				}
+			if (!impact && this.enemyShipSpecial != null
+					&& !this.enemyShipSpecial.isDestroyed()
+					&& checkCollision(grenade, this.enemyShipSpecial))
+				impact = true;
+
+			if (impact || grenade.hasReachedAltitude()) {
+				exploded.add(grenade);
+				this.fragments.addAll(GrenadeFragment.explode(
+						grenade.getCenterX(), grenade.getCenterY()));
+			}
+		}
+		this.grenades.removeAll(exploded);
+
+		Set<GrenadeFragment> expired = new HashSet<GrenadeFragment>();
+		for (GrenadeFragment fragment : this.fragments) {
+			fragment.update();
+
+			// A fragment is used up as soon as it destroys one enemy.
+			boolean used = false;
+			for (EnemyShip enemyShip : this.enemyShipFormation)
+				if (!enemyShip.isDestroyed()
+						&& checkCollision(fragment, enemyShip)) {
+					this.score += enemyShip.getPointValue();
+					this.shipsDestroyed++;
+					this.enemyShipFormation.destroy(enemyShip);
+					tryDropGrenade(enemyShip);
+					used = true;
+					break;
+				}
+
+			if (!used && this.enemyShipSpecial != null
+					&& !this.enemyShipSpecial.isDestroyed()
+					&& checkCollision(fragment, this.enemyShipSpecial)) {
+				this.score += this.enemyShipSpecial.getPointValue();
+				this.shipsDestroyed++;
+				this.enemyShipSpecial.destroy();
+				this.enemyShipSpecialExplosionCooldown.reset();
+				used = true;
+			}
+
+			if (used || fragment.isExpired())
+				expired.add(fragment);
+		}
+		this.fragments.removeAll(expired);
+	}
+
 	/**
 	 * Applies the Orbital Annihilator beam: destroys every enemy in the
 	 * corridor and neutralizes enemy projectiles inside it.
@@ -448,7 +563,7 @@ public class GameScreen extends Screen {
 	}
 	/**
 	 * Checks if two entities are colliding.
-	 * 
+	 *
 	 * @param a
 	 *            First entity, the bullet.
 	 * @param b
@@ -482,7 +597,7 @@ public class GameScreen extends Screen {
 
 	/**
 	 * Returns a GameState object representing the status of the game.
-	 * 
+	 *
 	 * @return Current game state.
 	 */
 	public final GameState getGameState() {
